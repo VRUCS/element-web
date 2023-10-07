@@ -8,7 +8,7 @@ const MiniCssExtractPlugin = require("mini-css-extract-plugin");
 const TerserPlugin = require("terser-webpack-plugin");
 const OptimizeCSSAssetsPlugin = require("optimize-css-assets-webpack-plugin");
 const HtmlWebpackInjectPreload = require("@principalstudio/html-webpack-inject-preload");
-const SentryCliPlugin = require("@sentry/webpack-plugin");
+const { sentryWebpackPlugin } = require("@sentry/webpack-plugin");
 const crypto = require("crypto");
 
 // XXX: mangle Crypto::createHash to replace md4 with sha256, output.hashFunction is insufficient as multiple bits
@@ -61,6 +61,15 @@ try {
     // stringify the output so it appears in logs correctly, as large files can sometimes get
     // represented as `<Object>` which is less than helpful.
     console.log("Using customisations.json : " + JSON.stringify(fileOverrides, null, 4));
+
+    process.on("exit", () => {
+        console.log(""); // blank line
+        console.warn("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        console.warn("!! Customisations have been deprecated and will be removed in a future release      !!");
+        console.warn("!! See https://github.com/vector-im/element-web/blob/develop/docs/customisations.md !!");
+        console.warn("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+        console.log(""); // blank line
+    });
 } catch (e) {
     // ignore - not important
 }
@@ -162,6 +171,17 @@ module.exports = (env, argv) => {
                         enforce: true,
                         // Do not add `chunks: 'all'` here because you'll break the app entry point.
                     },
+
+                    // put the unhomoglyph data in its own file. It contains
+                    // magic characters which mess up line numbers in the
+                    // javascript debugger.
+                    unhomoglyph_data: {
+                        name: "unhomoglyph_data",
+                        test: /unhomoglyph\/data\.json$/,
+                        enforce: true,
+                        chunks: "all",
+                    },
+
                     default: {
                         reuseExistingChunk: true,
                     },
@@ -207,8 +227,13 @@ module.exports = (env, argv) => {
                 // Same goes for js/react-sdk - we don't need two copies.
                 "matrix-js-sdk": path.resolve(__dirname, "node_modules/matrix-js-sdk"),
                 "matrix-react-sdk": path.resolve(__dirname, "node_modules/matrix-react-sdk"),
-                // and sanitize-html
-                "sanitize-html": path.resolve(__dirname, "node_modules/sanitize-html"),
+                "@matrix-org/react-sdk-module-api": path.resolve(
+                    __dirname,
+                    "node_modules/@matrix-org/react-sdk-module-api",
+                ),
+                // and matrix-events-sdk & matrix-widget-api
+                "matrix-events-sdk": path.resolve(__dirname, "node_modules/matrix-events-sdk"),
+                "matrix-widget-api": path.resolve(__dirname, "node_modules/matrix-widget-api"),
 
                 // Define a variable so the i18n stuff can load
                 "$webapp": path.resolve(__dirname, "webapp"),
@@ -260,6 +285,12 @@ module.exports = (env, argv) => {
                         // include node modules inside these modules, so we add 'src'.
                         if (f.startsWith(reactSdkSrcDir)) return true;
                         if (f.startsWith(jsSdkSrcDir)) return true;
+
+                        // Some of the syntax in this package is not understood by
+                        // either webpack or our babel setup.
+                        // When we do get to upgrade our current setup, this should
+                        // probably be removed.
+                        if (f.includes(path.join("@vector-im", "compound-web"))) return true;
 
                         // but we can't run all of our dependencies through babel (many of them still
                         // use module.exports which breaks if babel injects an 'include' for its
@@ -476,7 +507,7 @@ module.exports = (env, argv) => {
                 },
                 {
                     // cache-bust languages.json file placed in
-                    // element-web/webapp/i18n during build by copy-res.js
+                    // element-web/webapp/i18n during build by copy-res.ts
                     test: /\.*languages.json$/,
                     type: "javascript/auto",
                     loader: "file-loader",
@@ -504,6 +535,12 @@ module.exports = (env, argv) => {
                                         removeDimensions: true,
                                     },
                                 },
+                                /**
+                                 * Forwards the React ref to the root SVG element
+                                 * Useful when using things like `asChild` in
+                                 * radix-ui
+                                 */
+                                ref: true,
                                 esModule: false,
                                 name: "[name].[hash:7].[ext]",
                                 outputPath: getAssetOutputPath,
@@ -658,9 +695,11 @@ module.exports = (env, argv) => {
 
             // upload to sentry if sentry env is present
             process.env.SENTRY_DSN &&
-                new SentryCliPlugin({
+                sentryWebpackPlugin({
                     release: process.env.VERSION,
-                    include: "./webapp/bundles",
+                    sourcemaps: {
+                        paths: "./webapp/bundles/**",
+                    },
                     errorHandler: (err, invokeErr, compilation) => {
                         compilation.warnings.push("Sentry CLI Plugin: " + err.message);
                         console.log(`::warning title=Sentry error::${err.message}`);
@@ -707,14 +746,36 @@ module.exports = (env, argv) => {
  * @return {string} The returned paths will look like `img/warning.1234567.svg`.
  */
 function getAssetOutputPath(url, resourcePath) {
+    const isKaTeX = resourcePath.includes("KaTeX");
     // `res` is the parent dir for our own assets in various layers
     // `dist` is the parent dir for KaTeX assets
     const prefix = /^.*[/\\](dist|res)[/\\]/;
-    if (!resourcePath.match(prefix)) {
+
+    /**
+     * Only needed for https://github.com/vector-im/element-web/pull/15939
+     * If keeping this, we are not able to load external assets such as SVG
+     * images coming from @vector-im/compound-web.
+     */
+    if (isKaTeX && !resourcePath.match(prefix)) {
         throw new Error(`Unexpected asset path: ${resourcePath}`);
     }
     let outputDir = path.dirname(resourcePath).replace(prefix, "");
-    if (resourcePath.includes("KaTeX")) {
+
+    /**
+     * Imports from Compound are "absolute", we need to strip out the prefix
+     * coming before the npm package name.
+     *
+     * This logic is scoped to compound packages for now as they are the only
+     * package that imports external assets. This might need to be made more
+     * generic in the future
+     */
+    const compoundImportsPrefix = /@vector-im(?:\\|\/)compound-(.*?)(?:\\|\/)/;
+    const compoundMatch = outputDir.match(compoundImportsPrefix);
+    if (compoundMatch) {
+        outputDir = outputDir.substring(compoundMatch.index + compoundMatch[0].length);
+    }
+
+    if (isKaTeX) {
         // Add a clearly named directory segment, rather than leaving the KaTeX
         // assets loose in each asset type directory.
         outputDir = path.join(outputDir, "KaTeX");

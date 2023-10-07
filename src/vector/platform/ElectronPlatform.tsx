@@ -21,7 +21,6 @@ limitations under the License.
 import { UpdateCheckStatus, UpdateStatus } from "matrix-react-sdk/src/BasePlatform";
 import BaseEventIndexManager from "matrix-react-sdk/src/indexing/BaseEventIndexManager";
 import dis from "matrix-react-sdk/src/dispatcher/dispatcher";
-import { _t } from "matrix-react-sdk/src/languageHandler";
 import SdkConfig from "matrix-react-sdk/src/SdkConfig";
 import { IConfigOptions } from "matrix-react-sdk/src/IConfigOptions";
 import * as rageshake from "matrix-react-sdk/src/rageshake/rageshake";
@@ -43,10 +42,12 @@ import { MatrixEvent } from "matrix-js-sdk/src/models/event";
 import { BreadcrumbsStore } from "matrix-react-sdk/src/stores/BreadcrumbsStore";
 import { UPDATE_EVENT } from "matrix-react-sdk/src/stores/AsyncStore";
 import { avatarUrlForRoom, getInitialLetter } from "matrix-react-sdk/src/Avatar";
+import DesktopCapturerSourcePicker from "matrix-react-sdk/src/components/views/elements/DesktopCapturerSourcePicker";
 
 import VectorBasePlatform from "./VectorBasePlatform";
 import { SeshatIndexManager } from "./SeshatIndexManager";
 import { IPCManager } from "./IPCManager";
+import { _t } from "../../languageHandler";
 
 interface SquirrelUpdate {
     releaseNotes: string;
@@ -149,17 +150,25 @@ export default class ElectronPlatform extends VectorBasePlatform {
 
             ToastStore.sharedInstance().addOrReplaceToast({
                 key,
-                title: _t("Download Completed"),
+                title: _t("download_completed"),
                 props: {
                     description: name,
-                    acceptLabel: _t("Open"),
+                    acceptLabel: _t("action|open"),
                     onAccept,
-                    dismissLabel: _t("Dismiss"),
+                    dismissLabel: _t("action|dismiss"),
                     onDismiss,
                     numSeconds: 10,
                 },
                 component: GenericExpiringToast,
                 priority: 99,
+            });
+        });
+
+        window.electron.on("openDesktopCapturerSourcePicker", () => {
+            const { finished } = Modal.createDialog(DesktopCapturerSourcePicker);
+            finished.then(([source]) => {
+                if (!source) return;
+                this.ipc.call("callDisplayMediaCallback", source);
             });
         });
 
@@ -304,7 +313,7 @@ export default class ElectronPlatform extends VectorBasePlatform {
 
     public getDefaultDeviceDisplayName(): string {
         const brand = SdkConfig.get().brand;
-        return _t("%(brand)s Desktop: %(platformName)s", {
+        return _t("desktop_default_device_name", {
             brand,
             platformName: platformFriendlyName(),
         });
@@ -381,7 +390,7 @@ export default class ElectronPlatform extends VectorBasePlatform {
         // this will get intercepted by electron-main will-navigate
         super.startSingleSignOn(mxClient, loginType, fragmentAfterLogin, idpId);
         Modal.createDialog(InfoDialog, {
-            title: _t("Go to your browser to complete Sign In"),
+            title: _t("auth|sso_complete_in_browser_dialog_title"),
             description: <Spinner />,
         });
     }

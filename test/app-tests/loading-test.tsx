@@ -34,7 +34,7 @@ import { ActionPayload } from "matrix-react-sdk/src/dispatcher/payloads";
 import "../jest-mocks";
 import WebPlatform from "../../src/vector/platform/WebPlatform";
 import { parseQs, parseQsFromFragment } from "../../src/vector/url_utils";
-import { cleanLocalstorage, deleteIndexedDB } from "../test-utils";
+import { cleanLocalstorage, deleteIndexedDB, waitForLoadingSpinner, waitForWelcomeComponent } from "../test-utils";
 
 const DEFAULT_HS_URL = "http://my_server";
 const DEFAULT_IS_URL = "http://my_is";
@@ -143,9 +143,6 @@ describe("loading:", function () {
                     enableGuest={true}
                     onTokenLoginCompleted={resolve}
                     initialScreenAfterLogin={getScreenFromLocation(windowLocation!)}
-                    makeRegistrationUrl={(): string => {
-                        throw new Error("Not implemented");
-                    }}
                 />,
             );
         });
@@ -158,10 +155,8 @@ describe("loading:", function () {
     async function expectAndAwaitSync(opts?: { isGuest?: boolean }): Promise<any> {
         let syncRequest: (typeof MockHttpBackend.prototype.requests)[number] | null = null;
         httpBackend.when("GET", "/_matrix/client/versions").respond(200, {
-            versions: ["r0.3.0"],
-            unstable_features: {
-                "m.lazy_load_members": true,
-            },
+            versions: ["v1.1"],
+            unstable_features: {},
         });
         const isGuest = opts?.isGuest;
         if (!isGuest) {
@@ -194,7 +189,7 @@ describe("loading:", function () {
                 .then(async () => {
                     // at this point, we're trying to do a guest registration;
                     // we expect a spinner
-                    await assertAtLoadingSpinner();
+                    await waitForLoadingSpinner();
 
                     httpBackend
                         .when("POST", "/register")
@@ -207,7 +202,7 @@ describe("loading:", function () {
                 })
                 .then(() => {
                     // Wait for another trip around the event loop for the UI to update
-                    return awaitWelcomeComponent(matrixChat);
+                    return waitForWelcomeComponent(matrixChat);
                 })
                 .then(() => {
                     return waitFor(() => expect(windowLocation?.hash).toEqual("#/welcome"));
@@ -220,14 +215,14 @@ describe("loading:", function () {
             });
 
             // Pass the liveliness checks
-            httpBackend.when("GET", "/versions").respond(200, { versions: ["r0.4.0"] });
+            httpBackend.when("GET", "/versions").respond(200, { versions: ["v1.1"] });
             httpBackend.when("GET", "/_matrix/identity/v2").respond(200, {});
 
             return sleep(1)
                 .then(async () => {
                     // at this point, we're trying to do a guest registration;
                     // we expect a spinner
-                    await assertAtLoadingSpinner();
+                    await waitForLoadingSpinner();
 
                     httpBackend
                         .when("POST", "/register")
@@ -270,7 +265,7 @@ describe("loading:", function () {
             });
 
             // Pass the liveliness checks
-            httpBackend.when("GET", "/versions").respond(200, { versions: ["r0.4.0"] });
+            httpBackend.when("GET", "/versions").respond(200, { versions: ["v1.1"] });
             httpBackend.when("GET", "/_matrix/identity/v2").respond(200, {});
 
             return awaitLoginComponent(matrixChat)
@@ -283,7 +278,7 @@ describe("loading:", function () {
                     // the only outstanding request should be a GET /login
                     // (in particular there should be no /register request for
                     // guest registration).
-                    const allowedRequests = ["/_matrix/client/r0/login", "/versions", "/_matrix/identity/v2"];
+                    const allowedRequests = ["/_matrix/client/v3/login", "/versions", "/_matrix/identity/v2"];
                     for (const req of httpBackend.requests) {
                         if (req.method === "GET" && allowedRequests.find((p) => req.path.endsWith(p))) {
                             continue;
@@ -396,7 +391,7 @@ describe("loading:", function () {
                 .then(async () => {
                     // at this point, we're trying to do a guest registration;
                     // we expect a spinner
-                    await assertAtLoadingSpinner();
+                    await waitForLoadingSpinner();
 
                     httpBackend
                         .when("POST", "/register")
@@ -432,7 +427,7 @@ describe("loading:", function () {
                 .then(async () => {
                     // at this point, we're trying to do a guest registration;
                     // we expect a spinner
-                    await assertAtLoadingSpinner();
+                    await waitForLoadingSpinner();
 
                     httpBackend
                         .when("POST", "/register")
@@ -460,8 +455,8 @@ describe("loading:", function () {
                     httpBackend.verifyNoOutstandingExpectation();
                     expect(matrixChat?.container.querySelector(".mx_Welcome")).toBeTruthy();
                     expect(windowLocation?.hash).toEqual("#/welcome");
-                    expect(MatrixClientPeg.get().baseUrl).toEqual(DEFAULT_HS_URL);
-                    expect(MatrixClientPeg.get().idBaseUrl).toEqual(DEFAULT_IS_URL);
+                    expect(MatrixClientPeg.safeGet().baseUrl).toEqual(DEFAULT_HS_URL);
+                    expect(MatrixClientPeg.safeGet().idBaseUrl).toEqual(DEFAULT_IS_URL);
                 });
         });
 
@@ -473,7 +468,7 @@ describe("loading:", function () {
                 .then(async () => {
                     // at this point, we're trying to do a guest registration;
                     // we expect a spinner
-                    await assertAtLoadingSpinner();
+                    await waitForLoadingSpinner();
 
                     httpBackend
                         .when("POST", "/register")
@@ -567,7 +562,7 @@ describe("loading:", function () {
             return sleep(1)
                 .then(async () => {
                     // we expect a spinner while we're logging in
-                    await assertAtLoadingSpinner();
+                    await waitForLoadingSpinner();
 
                     httpBackend
                         .when("POST", "/login")
@@ -593,6 +588,11 @@ describe("loading:", function () {
                     return tokenLoginCompletePromise;
                 })
                 .then(() => {
+                    return expectAndAwaitSync().catch((e) => {
+                        throw new Error("Never got /sync after login: did the client start?");
+                    });
+                })
+                .then(() => {
                     // check that the localstorage has been set up in such a way that
                     // the reloaded app can pick up where we leave off.
                     expect(localStorage.getItem("mx_user_id")).toEqual("@user:localhost");
@@ -611,10 +611,6 @@ describe("loading:", function () {
         httpBackend.when("GET", "/login").respond(200, { flows: [{ type: "m.login.password" }] });
         httpBackend.flush(undefined); // We already would have tried the GET /login request
 
-        // Give the component some time to finish processing the login flows before
-        // continuing.
-        await sleep(100);
-
         httpBackend
             .when("POST", "/login")
             .check(function (req) {
@@ -628,6 +624,11 @@ describe("loading:", function () {
                 device_id: "DEVICE_ID",
                 access_token: "access_token",
             });
+
+        // Give the component some time to finish processing the login flows before continuing.
+        await waitFor(() => expect(matrixChat?.container.querySelector("#mx_LoginForm_username")).toBeTruthy());
+
+        // Enter login details
         fireEvent.change(matrixChat.container.querySelector("#mx_LoginForm_username")!, { target: { value: "user" } });
         fireEvent.change(matrixChat.container.querySelector("#mx_LoginForm_password")!, { target: { value: "pass" } });
         fireEvent.click(screen.getByText("Sign in", { selector: ".mx_Login_submit" }));
@@ -648,11 +649,6 @@ describe("loading:", function () {
             });
     }
 });
-
-// assert that we are on the loading page
-async function assertAtLoadingSpinner(): Promise<void> {
-    await screen.findByRole("progressbar");
-}
 
 async function awaitLoggedIn(matrixChat: RenderResult): Promise<void> {
     if (matrixChat.container.querySelector(".mx_MatrixChat_wrapper")) return; // already logged in
@@ -677,10 +673,6 @@ async function awaitRoomView(matrixChat?: RenderResult): Promise<void> {
 
 async function awaitLoginComponent(matrixChat?: RenderResult): Promise<void> {
     await waitFor(() => matrixChat?.container.querySelector(".mx_AuthPage"));
-}
-
-async function awaitWelcomeComponent(matrixChat?: RenderResult): Promise<void> {
-    await waitFor(() => matrixChat?.container.querySelector(".mx_Welcome"));
 }
 
 function moveFromWelcomeToLogin(matrixChat?: RenderResult): Promise<void> {

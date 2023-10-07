@@ -19,6 +19,7 @@ limitations under the License.
 */
 
 import { logger } from "matrix-js-sdk/src/logger";
+import { extractErrorMessageFromError } from "matrix-react-sdk/src/components/views/dialogs/ErrorDialog";
 
 // These are things that can run before the skin loads - be careful not to reference the react-sdk though.
 import { parseQsFromFragment } from "./url_utils";
@@ -194,19 +195,16 @@ async function start(): Promise<void> {
             await loadConfigPromise;
         } catch (error) {
             // Now that we've loaded the theme (CSS), display the config syntax error if needed.
-            if (error.err && error.err instanceof SyntaxError) {
+            if (error instanceof SyntaxError) {
                 // This uses the default brand since the app config is unavailable.
-                return showError(_t("Your Element is misconfigured"), [
-                    _t(
-                        "Your Element configuration contains invalid JSON. " +
-                            "Please correct the problem and reload the page.",
-                    ),
-                    _t("The message from the parser is: %(message)s", {
-                        message: error.err.message || _t("Invalid JSON"),
+                return showError(_t("error|misconfigured"), [
+                    _t("error|invalid_json"),
+                    _t("error|invalid_json_detail", {
+                        message: error.message || _t("error|invalid_json_generic"),
                     }),
                 ]);
             }
-            return showError(_t("Unable to load config file: please refresh the page to try again."));
+            return showError(_t("error|cannot_load_config"));
         }
 
         // ##################################
@@ -230,8 +228,8 @@ async function start(): Promise<void> {
         logger.error(err);
         // Like the compatibility page, AWOOOOOGA at the user
         // This uses the default brand since the app config is unavailable.
-        await showError(_t("Your Element is misconfigured"), [
-            err.translatedMessage || _t("Unexpected error preparing the app. See console for details."),
+        await showError(_t("error|misconfigured"), [
+            extractErrorMessageFromError(err, _t("error|app_launch_unexpected_error")),
         ]);
     }
 }
